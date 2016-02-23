@@ -1,0 +1,20 @@
+#!/sbin/runscript
+# Copyright 2016 Jason A. Donenfeld <Jason@zx2c4.com>
+
+PID_FILE="/run/git-daemon-dummy.pid"
+
+depend() {
+	need net
+}
+
+start() {
+	ebegin "Starting git-daemon-dummy"
+	start-stop-daemon --start --exec /usr/bin/git-daemon-dummy --pidfile $PID_FILE -- --daemonize --pid-file=$PID_FILE --uri-prefix="$URI_PREFIX"
+	eend $?
+}
+
+stop() {
+	ebegin "Stopping git-daemon-dummy"
+	start-stop-daemon --stop --exec /usr/bin/git-daemon-dummy --pidfile $PID_FILE
+	eend $?
+}
