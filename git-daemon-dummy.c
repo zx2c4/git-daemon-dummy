@@ -107,6 +107,7 @@ void seccomp_enable_filter(void)
 		ALLOW_SYSCALL(read),
 		ALLOW_SYSCALL(write),
 		ALLOW_SYSCALL(epoll_wait),
+		ALLOW_SYSCALL(epoll_pwait),
 		ALLOW_SYSCALL(epoll_ctl),
 		ALLOW_SYSCALL(accept4),
 		ALLOW_SYSCALL(close),
