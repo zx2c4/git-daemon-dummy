@@ -4,6 +4,7 @@
  * Instructs users to use an https:// clone/pull/push URI instead of git://
  *
  * Copyright 2016 Jason A. Donenfeld <Jason@zx2c4.com>. All Rights Reserved.
+ * This file is licensed under the GPLv3. Please see COPYING for more information.
  *
  */
 
