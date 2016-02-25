@@ -9,7 +9,7 @@ depend() {
 
 start() {
 	ebegin "Starting git-daemon-dummy"
-	start-stop-daemon --start --exec /usr/bin/git-daemon-dummy --pidfile $PID_FILE -- --daemonize --pid-file=$PID_FILE --uri-prefix="$URI_PREFIX"
+	start-stop-daemon --start --exec /usr/bin/git-daemon-dummy --pidfile $PID_FILE -- --daemonize --pid-file=$PID_FILE
 	eend $?
 }
 

@@ -29,7 +29,6 @@ use of `epoll`.
 ### Usage
 
     Usage: ./git-daemon-dummy [OPTION]...
-      -u URI, --uri-prefix=URI     use URI as prefix to redirect uri (default=https://git.example.com)
       -d, --daemonize              run as a background daemon
       -f, --foreground             run in the foreground (default)
       -P FILE, --pid-file=FILE     write pid of listener process to FILE

@@ -29,8 +29,6 @@
 #include <netinet/in.h>
 #include "seccomp-bpf.h"
 
-static const char MESSAGE_TEMPLATE[] = "\n******************************************************\n\n  This git repository has moved! Please clone with:\n\n      $ git clone %s%s\n\n******************************************************";
-
 enum {
 	LISTEN_BACKLOG = 16,
 	EPOLL_EVENTS = 128,
@@ -125,10 +123,9 @@ void seccomp_enable_filter(void)
 	}
 }
 
-static void parse_options(int argc, char *argv[], bool *daemonize, int *port, char **pid_file, char **message)
+static void parse_options(int argc, char *argv[], bool *daemonize, int *port, char **pid_file)
 {
 	static const struct option long_options[] = {
-		{"uri-prefix", required_argument, NULL, 'u'},
 		{"daemonize", no_argument, NULL, 'd'},
 		{"foreground", no_argument, NULL, 'f'},
 		{"port", required_argument, NULL, 'p'},
@@ -138,23 +135,12 @@ static void parse_options(int argc, char *argv[], bool *daemonize, int *port, ch
 	};
 	int option_index = 0, option;
 
-	*message = NULL;
 	*pid_file = NULL;
 	*daemonize = false;
 	*port = 9418;
 
-	while ((option = getopt_long(argc, argv, "u:dfP:p:h", long_options, &option_index)) != -1) {
+	while ((option = getopt_long(argc, argv, "dfP:p:h", long_options, &option_index)) != -1) {
 		switch (option) {
-			case 'u': {
-				size_t len = strlen(optarg);
-				if (len && optarg[len - 1] == '/')
-					optarg[len - 1] = '\0';
-				if (asprintf(message, MESSAGE_TEMPLATE, optarg, "%s") < 0) {
-					perror("asprintf");
-					exit(EXIT_FAILURE);
-				}
-				break;
-			}
 			case 'd':
 				*daemonize = true;
 				break;
@@ -171,7 +157,6 @@ static void parse_options(int argc, char *argv[], bool *daemonize, int *port, ch
 			case '?':
 			default:
 				fprintf(stderr, "Usage: %s [OPTION]...\n", argv[0]);
-				fprintf(stderr, "  -u URI, --uri-prefix=URI     use URI as prefix to redirect uri (default=https://git.example.com)\n");
 				fprintf(stderr, "  -d, --daemonize              run as a background daemon\n");
 				fprintf(stderr, "  -f, --foreground             run in the foreground (default)\n");
 				fprintf(stderr, "  -P FILE, --pid-file=FILE     write pid of listener process to FILE\n");
@@ -179,14 +164,6 @@ static void parse_options(int argc, char *argv[], bool *daemonize, int *port, ch
 				fprintf(stderr, "  -h, --help                   display this message\n");
 				exit(option == 'h' ? EXIT_SUCCESS : EXIT_FAILURE);
 		}
-	}
-
-	if (!*message) {
-		if (asprintf(message, MESSAGE_TEMPLATE, "https://git.example.com", "%s") < 0) {
-			perror("asprintf");
-			exit(EXIT_FAILURE);
-		}
-		fprintf(stderr, "Warning: please specify -u/--uri-prefix to avoid returning the example prefix.\n");
 	}
 }
 
@@ -270,130 +247,55 @@ static int setup_epoll(int listen_fd)
 	return epoll_fd;
 }
 
-static void handle_new_connection(int epoll_fd, struct epoll_event *event)
+static void process_request(int epoll_fd, int fd, bool direct);
+struct out_data {
+	int fd;
+	unsigned int len;
+	char data[];
+};
+
+static void event_new_connection(int epoll_fd, struct epoll_event *event)
 {
 	int connection_fd;
-	struct epoll_event new_event = {
-		.events = EPOLLIN | EPOLLET
-	};
 
 	if (event->events & EPOLLERR || event->events & EPOLLHUP)
 		exit(EXIT_FAILURE);
 
 	for (;;) {
 		connection_fd = accept4(event->data.fd, NULL, NULL, SOCK_NONBLOCK);
-		if (connection_fd < 0) {
-			if (errno == EAGAIN || errno == EWOULDBLOCK)
-				break;
-			perror("accept4");
+		if (connection_fd < 0)
 			break;
-		}
-		new_event.data.fd = connection_fd;
-		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, connection_fd, &new_event) < 0) {
-			perror("epoll_ctl");
-			close(connection_fd);
-		}
+		process_request(epoll_fd, connection_fd, true);
 	}
 }
 
-struct out_data {
-	int fd;
-	char repo[];
-};
-
-static void handle_read_data(int epoll_fd, struct epoll_event *event)
+static void event_can_read(int epoll_fd, struct epoll_event *event)
 {
-	struct out_data *out;
-	char buf[MAX_MSG_SIZE];
-	char *repo;
-	ssize_t len;
-	unsigned long total_size;
-	struct epoll_event new_event = {
-		.events = EPOLLOUT
-	};
-
-	if (read(event->data.fd, buf, 4) != 4) {
-		if (errno != EAGAIN && errno != EWOULDBLOCK)
-			close(event->data.fd);
-		return;
-	}
-	buf[4] = '\0';
-	total_size = strtoul(buf, NULL, 16);
-	if (total_size <= 4 || total_size > MAX_MSG_SIZE) {
+	if (event->events & EPOLLERR || event->events & EPOLLHUP)
 		close(event->data.fd);
-		return;
-	}
-
-	len = read(event->data.fd, buf, total_size - 4);
-	if (len != total_size - 4) {
-		close(event->data.fd);
-		return;
-	}
-	if (buf[len - 1]) {
-		close(event->data.fd);
-		return;
-	}
-	if (strncmp(buf, "git-upload-pack ", strlen("git-upload-pack "))) {
-		close(event->data.fd);
-		return;
-	}
-
-	repo = buf + strlen("git-upload-pack ");
-	if (repo[0] != '/') {
-		--repo;
-		repo[0] = '/';
-	}
-	out = malloc(sizeof(struct out_data) + strlen(repo) + 1);
-	if (!out) {
-		close(event->data.fd);
-		return;
-	}
-	out->fd = event->data.fd;
-	strcpy(out->repo, repo);
-	new_event.data.ptr = out;
-	if (epoll_ctl(epoll_fd, EPOLL_CTL_MOD, out->fd, &new_event) < 0) {
-		free(out);
-		close(event->data.fd);
-	}
+	else
+		process_request(epoll_fd, event->data.fd, false);
 }
 
-static void handle_write_data(int epoll_fd, const char *message, struct epoll_event *event)
+static void event_can_write(int epoll_fd, struct epoll_event *event)
 {
 	struct out_data *out = event->data.ptr;
-	char hexlen[128];
-	size_t msg_len = strlen(out->repo) + strlen(message) - 2 + 1;
-	unsigned int len = 8 + msg_len;
-	struct {
-		char len[4];
-		char err[4];
-		char message[msg_len];
-	} __attribute__((packed)) to_send;
-
-	sprintf(hexlen, "%04x", len);
-	memcpy(to_send.len, hexlen, 4);
-	memcpy(to_send.err, "ERR ", 4);
-	sprintf(to_send.message, message, out->repo);
-
-	if (write(out->fd, (void *)&to_send, len) < 0 && (errno == EAGAIN || errno == EWOULDBLOCK))
-		return;
-
-	close(out->fd);
-	free(out);
-}
-
-static void handle_new_data(int epoll_fd, const char *message, struct epoll_event *event)
-{
-	if (event->events & EPOLLERR || event->events & EPOLLHUP || !(event->events & EPOLLIN || event->events & EPOLLOUT)) {
-		close(event->data.fd);
+	if (event->events & EPOLLERR || event->events & EPOLLHUP) {
+		close(out->fd);
+		free(out);
 		return;
 	}
-	if (event->events & EPOLLIN)
-		handle_read_data(epoll_fd, event);
-	if (event->events & EPOLLOUT)
-		handle_write_data(epoll_fd, message, event);
+	if (write(out->fd, out->data, out->len) != out->len) {
+		if (errno != EAGAIN && errno != EWOULDBLOCK) {
+			close(out->fd);
+			free(out);
+		}
+		return;
+	}
+	close(out->fd);
 }
 
-static void event_loop(int epoll_fd, int listen_fd, const char *message)
+static void event_loop(int epoll_fd, int listen_fd)
 {
 	struct epoll_event events[EPOLL_EVENTS] = { 0 };
 	int num_events;
@@ -401,30 +303,134 @@ static void event_loop(int epoll_fd, int listen_fd, const char *message)
 	while ((num_events = epoll_wait(epoll_fd, events, EPOLL_EVENTS, -1)) >= 0) {
 		for (int i = 0; i < num_events; ++i) {
 			if (events[i].data.fd == listen_fd)
-				handle_new_connection(epoll_fd, &events[i]);
-			else
-				handle_new_data(epoll_fd, message, &events[i]);
+				event_new_connection(epoll_fd, &events[i]);
+			else if (events[i].events & EPOLLIN)
+				event_can_read(epoll_fd, &events[i]);
+			else if (events[i].events & EPOLLOUT)
+				event_can_write(epoll_fd, &events[i]);
 		}
 	}
+}
 
-	perror("epoll_wait");
-	exit(EXIT_FAILURE);
+
+static int parse_data(int fd, char *buf, char **repo, char **host)
+{
+	size_t line_len, parsed_len;
+	ssize_t len;
+
+	if (read(fd, buf, 4) != 4)
+		return (errno == EAGAIN || errno == EWOULDBLOCK) ? -2 : -1;
+
+	buf[4] = '\0';
+	parsed_len = strtoul(buf, NULL, 16);
+	if (parsed_len <= 4)
+		return -1;
+	parsed_len -= 4;
+	if (parsed_len >= MAX_MSG_SIZE)
+		return -1;
+
+	len = read(fd, buf, parsed_len);
+	if (len != parsed_len)
+		return -1;
+	buf[len] = '\0';
+
+	line_len = strlen(buf);
+	if (line_len && buf[line_len - 1] == '\n')
+		buf[--line_len] = '\0';
+
+	if (len <= line_len)
+		return -1;
+
+	*repo = buf;
+	if (strncasecmp(*repo, "git-upload-pack ", strlen("git-upload-pack ")))
+		return -1;
+	*repo += strlen("git-upload-pack ");
+	if (*repo[0] != '/') {
+		--*repo;
+		*repo[0] = '/';
+	}
+
+	*host = buf + line_len + 1;
+	if (strncasecmp(*host, "host=", strlen("host=")))
+		return -1;
+	*host += strlen("host=");
+	if (!*host[0])
+		return -1;
+
+	return 0;
+}
+
+static void process_request(int epoll_fd, int fd, bool direct)
+{
+	static const char message_template[] = "\n******************************************************\n\n  This git repository has moved! Please clone with:\n\n      $ git clone https://%s%s\n\n******************************************************";
+	char buf[MAX_MSG_SIZE];
+	struct out_data *out, *copy = NULL;
+	size_t msg_len, buffer_len;
+	char *repo, *host;
+	int ret;
+
+	ret = parse_data(fd, buf, &repo, &host);
+	if (ret == -1)
+		goto err;
+	else if (ret == -2) {
+		struct epoll_event new_event = {
+			.events = EPOLLIN | EPOLLET,
+			.data = {
+				.fd = fd
+			}
+		};
+		if (epoll_ctl(epoll_fd, EPOLL_CTL_ADD, fd, &new_event) < 0)
+			goto err;
+		return;
+	}
+
+	msg_len = strlen(repo) + strlen(host) + strlen(message_template) - 2 + 1;
+	buffer_len = msg_len + sizeof(struct out_data);
+	if (buffer_len > MAX_MSG_SIZE * 2)
+		goto err;
+	out = alloca(buffer_len);
+	out->fd = fd;
+	out->len = 8 + msg_len;
+	if (out->len > 0xffff)
+		goto err;
+	sprintf(out->data, "%04x", out->len);
+	memcpy(out->data + 4, "ERR ", 4);
+	sprintf(out->data + 8, message_template, host, repo);
+
+	if (write(fd, out->data, out->len) != out->len) {
+		struct epoll_event new_event = {
+			.events = EPOLLOUT
+		};
+		if (errno != EAGAIN && errno != EWOULDBLOCK)
+			goto err;
+		copy = malloc(buffer_len);
+		if (!copy)
+			goto err;
+		memcpy(copy, out, buffer_len);
+		new_event.data.ptr = copy;
+		if (epoll_ctl(epoll_fd, direct ? EPOLL_CTL_ADD : EPOLL_CTL_MOD, fd, &new_event) < 0)
+			goto err;
+		return;
+	}
+err:
+	close(fd);
+	free(copy);
 }
 
 int main(int argc, char *argv[])
 {
 	int listen_fd, epoll_fd, port;
 	bool daemonize;
-	char *message, *pid_file;
+	char *pid_file;
 
 	close(STDIN_FILENO);
-	parse_options(argc, argv, &daemonize, &port, &pid_file, &message);
+	parse_options(argc, argv, &daemonize, &port, &pid_file);
 	listen_fd = get_listen_socket(port);
 	epoll_fd = setup_epoll(listen_fd);
 	daemonize_and_pidfile(daemonize, pid_file);
 	prctl(PR_SET_NAME, "git-daemon-dummy");
 	drop_privileges();
 	seccomp_enable_filter();
-	event_loop(epoll_fd, listen_fd, message);
+	event_loop(epoll_fd, listen_fd);
 	return EXIT_FAILURE;
 }
